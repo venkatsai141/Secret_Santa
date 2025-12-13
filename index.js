@@ -4,10 +4,10 @@ const bodyParser = require('body-parser');
 const mongoose = require('mongoose');
 const cors = require('cors');
 
-const authRoutes = require('./routes/auth');
-const userRoutes = require('./routes/user');
-const adminRoutes = require('./routes/admin');
-const groupRoutes = require('./routes/group');
+const authRoutes = require('./src/routes/auth');
+const userRoutes = require('./src/routes/user');
+const adminRoutes = require('./src/routes/admin');
+const groupRoutes = require('./src/routes/group');
 
 const app = express();
 
