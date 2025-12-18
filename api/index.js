@@ -45,3 +45,11 @@ app.use(async (req, res, next) => {
 
 /* EXPORT — NO app.listen() */
 module.exports = app;
+
+app.get('/', (req, res) => {
+  res.json({
+    status: 'OK',
+    service: 'Secret Santa Backend',
+    time: new Date().toISOString()
+  });
+});
