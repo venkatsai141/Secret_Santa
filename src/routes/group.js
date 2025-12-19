@@ -8,12 +8,18 @@ const mongoose = require('mongoose');
 
 const router = express.Router();
 
-/* ? CREATE GROUP (No overwrite if group exists) */
+/* ---------------------------------------
+   CREATE GROUP
+   POST /api/group/create
+---------------------------------------- */
 router.post('/create', auth('USER'), async (req, res) => {
   try {
     const { name } = req.body;
+    if (!name) {
+      return res.status(400).json({ message: "Group name is required" });
+    }
 
-    // Check if a group with this name already exists for this owner
+    // prevent duplicate group names per owner
     const existingGroup = await Group.findOne({
       name,
       ownerId: req.user.sub
@@ -33,44 +39,57 @@ router.post('/create', auth('USER'), async (req, res) => {
       joinCode
     });
 
-    // create group member for owner
+    // owner is also a group member
     await GroupMember.create({
       groupId: group._id,
       userId: req.user.sub
     });
 
-    // also create a Participation record for the owner (submitted: false)
+    // create Participation record for owner
     await Participation.findOneAndUpdate(
       { groupId: group._id, userId: req.user.sub },
-      { groupId: group._id, userId: req.user.sub, submitted: false, eventId: 'default' },
+      {
+        eventId: 'default',
+        groupId: group._id,
+        userId: req.user.sub,
+        submitted: false,
+        addressStatus: 'NONE'
+      },
       { upsert: true }
     );
 
     res.json({ groupId: group._id, joinCode });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error", error: err.message });
+    console.error("[group.create] error:", err);
+    res.status(500).json({ message: "Server error" });
   }
 });
 
-/* ? JOIN GROUP (prevent joining same group twice) */
+/* ---------------------------------------
+   JOIN GROUP
+   POST /api/group/join
+---------------------------------------- */
 router.post('/join', auth('USER'), async (req, res) => {
   try {
     const { joinCode } = req.body;
-    if (!joinCode) return res.status(400).json({ message: "joinCode is required" });
+    if (!joinCode) {
+      return res.status(400).json({ message: "joinCode is required" });
+    }
 
-    const group = await Group.findOne({ joinCode: joinCode });
-    if (!group) return res.status(404).json({ message: "Group not found" });
+    const group = await Group.findOne({ joinCode });
+    if (!group) {
+      return res.status(404).json({ message: "Group not found" });
+    }
 
-    // Check if the user is already a member of this group
+    // prevent duplicate membership
     const existingMember = await GroupMember.findOne({
       groupId: group._id,
       userId: req.user.sub
     });
 
     if (existingMember) {
-      return res.status(409).json({ message: "User is already a member of this group" });
+      return res.status(409).json({ message: "User already in this group" });
     }
 
     await GroupMember.create({
@@ -78,17 +97,24 @@ router.post('/join', auth('USER'), async (req, res) => {
       userId: req.user.sub
     });
 
-    // create Participation record (submitted false initially) so later user can submit address
+    // create Participation record
     await Participation.findOneAndUpdate(
       { groupId: group._id, userId: req.user.sub },
-      { groupId: group._id, userId: req.user.sub, submitted: false, eventId: 'default' },
+      {
+        eventId: 'default',
+        groupId: group._id,
+        userId: req.user.sub,
+        submitted: false,
+        addressStatus: 'NONE'
+      },
       { upsert: true }
     );
 
     res.json({ message: "Joined group successfully" });
+
   } catch (err) {
-    console.error("Join group error:", err);
-    res.status(500).json({ message: "Server error", error: err.message });
+    console.error("[group.join] error:", err);
+    res.status(500).json({ message: "Server error" });
   }
 });
 

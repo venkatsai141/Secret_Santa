@@ -29,4 +29,13 @@ const acknowledgementSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+/**
+ * 🔒 Enforce ONE acknowledgement per santa-recipient-group
+ * Even if API is called twice, MongoDB will block it
+ */
+acknowledgementSchema.index(
+  { groupId: 1, santaId: 1, recipientId: 1 },
+  { unique: true }
+);
+
 module.exports = mongoose.model('Acknowledgement', acknowledgementSchema);

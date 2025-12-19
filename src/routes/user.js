@@ -1,16 +1,77 @@
+// routes/user.js
 const express = require('express');
 const auth = require('../middleware/auth');
 const Participation = require('../models/Participation');
 const RecipientWish = require('../models/RecipientWish');
 const Mapping = require('../models/Mapping');
-const { sendSantaEmail } = require('../utils/email'); // not used here but kept for reference
+const Acknowledgement = require('../models/Acknowledgement');
 const mongoose = require('mongoose');
 const { encrypt, decrypt } = require('../utils/cryptoUtil');
 
 const router = express.Router();
 
 /* ---------------------------------------
-   USER: Submit address (only after wish is APPROVED)
+   USER: Set / Re-set wish
+   (BLOCK if admin already APPROVED)
+   POST /api/user/set-wish/:groupId
+---------------------------------------- */
+router.post('/set-wish/:groupId', auth('USER'), async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(groupId)) {
+      return res.status(400).json({ message: "Invalid groupId" });
+    }
+
+    const groupObjectId = new mongoose.Types.ObjectId(groupId);
+
+    // user must be recipient in this group
+    const mapping = await Mapping.findOne({
+      groupId: groupObjectId,
+      recipientId: req.user.sub
+    });
+
+    if (!mapping) {
+      return res.status(403).json({ message: "You are not allowed to set a wish" });
+    }
+
+    // If an approved wish already exists, block edits
+    const existingWish = await RecipientWish.findOne({ groupId: groupObjectId, userId: req.user.sub });
+    if (existingWish && existingWish.status === 'APPROVED') {
+      return res.status(403).json({ message: "Wish already approved by admin; you cannot modify it." });
+    }
+
+    const { wish } = req.body;
+    if (!wish) {
+      return res.status(400).json({ message: "wish is required" });
+    }
+
+    const wishEncrypted = encrypt(wish);
+
+    // create/update (if present and not approved)
+    await RecipientWish.findOneAndUpdate(
+      { groupId: groupObjectId, userId: req.user.sub },
+      {
+        wishEncrypted,
+        wishSetAt: new Date(),
+        // keep PENDING so admin can approve
+        status: 'PENDING',
+        approvedAt: null,
+        approvedBy: null
+      },
+      { upsert: true }
+    );
+
+    res.json({ message: "Wish submitted and awaiting admin approval" });
+
+  } catch (err) {
+    console.error("set-wish error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* ---------------------------------------
+   USER: Submit / Re-submit address
+   (BLOCK if admin already APPROVED)
    POST /api/user/submit-address/:groupId
 ---------------------------------------- */
 router.post('/submit-address/:groupId', auth('USER'), async (req, res) => {
@@ -27,10 +88,16 @@ router.post('/submit-address/:groupId', auth('USER'), async (req, res) => {
       return res.status(403).json({ message: 'You are not a participant in this group' });
     }
 
-    // Ensure recipient's wish is APPROVED
+    // Ensure user's wish is APPROVED before submitting address
     const wishDoc = await RecipientWish.findOne({ groupId: groupObjectId, userId: req.user.sub });
     if (!wishDoc || wishDoc.status !== 'APPROVED') {
       return res.status(403).json({ message: 'Wish must be approved by admin before submitting address' });
+    }
+
+    // If address has already been approved by admin, block re-submission
+    const existingParticipation = await Participation.findOne({ groupId: groupObjectId, userId: req.user.sub });
+    if (existingParticipation && existingParticipation.addressStatus === 'APPROVED') {
+      return res.status(403).json({ message: "Address already approved by admin; you cannot modify it." });
     }
 
     const { address } = req.body;
@@ -38,9 +105,18 @@ router.post('/submit-address/:groupId', auth('USER'), async (req, res) => {
 
     const addressEncrypted = encrypt(address);
 
+    // create/update participation (only allowed when not already approved)
     await Participation.findOneAndUpdate(
       { groupId: groupObjectId, userId: req.user.sub },
-      { submitted: true, addressEncrypted, addressSubmittedAt: new Date(), addressStatus: 'PENDING' },
+      {
+        submitted: true,
+        addressEncrypted,
+        addressSubmittedAt: new Date(),
+        // keep PENDING for admin approval
+        addressStatus: 'PENDING',
+        addressApprovedAt: null,
+        addressApprovedBy: null
+      },
       { upsert: true }
     );
 
@@ -48,96 +124,6 @@ router.post('/submit-address/:groupId', auth('USER'), async (req, res) => {
   } catch (err) {
     console.error("submit-address error:", err);
     res.status(500).json({ message: 'Server error' });
-  }
-});
-
-/* ---------------------------------------
-   USER: Set wish (recipient sets wish -> status: PENDING)
-   POST /api/user/set-wish/:groupId
----------------------------------------- */
-router.post('/set-wish/:groupId', auth('USER'), async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(groupId)) {
-      return res.status(400).json({ message: "Invalid groupId" });
-    }
-    const groupObjectId = new mongoose.Types.ObjectId(groupId);
-
-    // check mapping: user must be a recipient in this group
-    const mapping = await Mapping.findOne({
-      groupId: groupObjectId,
-      recipientId: req.user.sub
-    });
-
-    if (!mapping) {
-      return res.status(403).json({ message: "You are not allowed to set a wish" });
-    }
-
-    const { wish } = req.body;
-    if (!wish) return res.status(400).json({ message: "wish is required" });
-
-    const wishEncrypted = encrypt(wish);
-
-    await RecipientWish.findOneAndUpdate(
-      { groupId: groupObjectId, userId: req.user.sub },
-      { wishEncrypted, wishSetAt: new Date(), status: 'PENDING', approvedAt: null, approvedBy: null },
-      { upsert: true }
-    );
-
-    res.json({ message: "Wish submitted and awaiting admin approval" });
-
-  } catch (err) {
-    console.error("set-wish error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-/* ---------------------------------------
-   USER: Get assignment by event (default) - hides recipient name
-   GET /api/user/my-assignment
----------------------------------------- */
-router.get('/my-assignment', auth('USER'), async (req, res) => {
-  try {
-    const eventId = "default";
-
-    const mapping = await Mapping.findOne({
-      eventId,
-      santaId: req.user.sub
-    });
-
-    if (!mapping) {
-      return res.status(404).json({ message: "No assignment yet" });
-    }
-
-    const wishDoc = await RecipientWish.findOne({
-      eventId,
-      userId: mapping.recipientId
-    });
-
-    if (!wishDoc || wishDoc.status !== 'APPROVED') {
-      return res.status(404).json({ message: "Recipient has not set an approved wish yet" });
-    }
-
-    const participation = await Participation.findOne({
-      eventId,
-      userId: mapping.recipientId
-    });
-
-    if (!participation || participation.addressStatus !== 'APPROVED') {
-      return res.status(404).json({ message: "Recipient's address is not approved yet" });
-    }
-
-    const wish = decrypt(wishDoc.wishEncrypted);
-    const address = decrypt(participation.addressEncrypted);
-
-    res.json({
-      wish,
-      address,
-      recipientNameHidden: true
-    });
-  } catch (err) {
-    console.error("my-assignment (event) error:", err);
-    res.status(500).json({ message: "Server error" });
   }
 });
 
@@ -199,7 +185,7 @@ router.get('/my-assignment/:groupId', auth('USER'), async (req, res) => {
 });
 
 /* ---------------------------------------
-   USER: Acknowledge (mark sent)
+   USER: Acknowledge (mark sent) - unchanged
    POST /api/user/acknowledge/:groupId
 ---------------------------------------- */
 router.post('/acknowledge/:groupId', auth('USER'), async (req, res) => {
@@ -222,20 +208,25 @@ router.post('/acknowledge/:groupId', auth('USER'), async (req, res) => {
       return res.status(403).json({ message: "You are not a Santa in this group" });
     }
 
-    const Acknowledgement = require('../models/Acknowledgement');
+    // Prevent double acknowledgement
+    const AcknowledgementModel = require('../models/Acknowledgement');
+    const existingAck = await AcknowledgementModel.findOne({
+      groupId: groupObjectId,
+      santaId: req.user.sub,
+      recipientId: mapping.recipientId
+    });
 
-    await Acknowledgement.findOneAndUpdate(
-      {
-        groupId: groupObjectId,
-        santaId: req.user.sub,
-        recipientId: mapping.recipientId
-      },
-      {
-        sentAt: new Date(),
-        sent: true
-      },
-      { upsert: true }
-    );
+    if (existingAck) {
+      return res.status(400).json({ message: "Gift already acknowledged" });
+    }
+
+    await AcknowledgementModel.create({
+      groupId: groupObjectId,
+      santaId: req.user.sub,
+      recipientId: mapping.recipientId,
+      sent: true,
+      sentAt: new Date()
+    });
 
     res.json({ message: "Gift marked as sent" });
 
